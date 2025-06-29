@@ -22,6 +22,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [activityTimeout, setActivityTimeout] = useState<NodeJS.Timeout | null>(null);
   const navigate = useNavigate();
 
+  const ensureUserProfile = async (user: User) => {
+    try {
+      // Check if user profile exists in public.users table
+      const { data: existingUser, error: fetchError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', user.id)
+        .single();
+
+      if (fetchError && fetchError.code !== 'PGRST116') {
+        // PGRST116 is "not found" error, which is expected for new users
+        console.error('Error checking user profile:', fetchError);
+        return;
+      }
+
+      // If user doesn't exist, create profile
+      if (!existingUser) {
+        const fullName = user.user_metadata?.full_name || 
+                        user.email?.split('@')[0] || 
+                        'User';
+
+        const { error: insertError } = await supabase
+          .from('users')
+          .insert([{
+            id: user.id,
+            email: user.email!,
+            full_name: fullName,
+            role: 'staff' // Default role
+          }]);
+
+        if (insertError) {
+          console.error('Error creating user profile:', insertError);
+          toast.error('Failed to create user profile');
+        } else {
+          console.log('User profile created successfully');
+        }
+      }
+    } catch (error) {
+      console.error('Error ensuring user profile:', error);
+    }
+  };
+
   const resetActivityTimer = () => {
     if (activityTimeout) {
       clearTimeout(activityTimeout);
@@ -48,9 +90,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         navigate('/login');
         return;
       }
-      setUser(session?.user ?? null);
+      
       if (session?.user) {
+        await ensureUserProfile(session.user);
+        setUser(session.user);
         resetActivityTimer();
+      } else {
+        setUser(null);
       }
       setIsLoading(false);
     };
@@ -60,14 +106,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
-      setUser(session?.user ?? null);
-      
       switch (event) {
       case 'SIGNED_IN':
-        toast.success('Signed in successfully');
-        resetActivityTimer();
+        if (session?.user) {
+          await ensureUserProfile(session.user);
+          setUser(session.user);
+          toast.success('Signed in successfully');
+          resetActivityTimer();
+        }
         break;
       case 'SIGNED_OUT':
+        setUser(null);
         if (activityTimeout) {
           clearTimeout(activityTimeout);
           setActivityTimeout(null);
@@ -75,8 +124,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         navigate('/login');
         break;
       case 'TOKEN_REFRESHED':
-        console.log('Session refreshed');
-        resetActivityTimer();
+        if (session?.user) {
+          setUser(session.user);
+          console.log('Session refreshed');
+          resetActivityTimer();
+        }
+        break;
+      default:
+        setUser(session?.user ?? null);
         break;
       }
     });
@@ -120,8 +175,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       
       if (error) throw error;
       
-      return data;
+      if (data.user) {
+        await ensureUserProfile(data.user);
+      }
+      
       resetActivityTimer();
+      return data;
     } catch (error) {
       console.error('Error signing in:', error);
       throw error;
